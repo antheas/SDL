@@ -263,57 +263,70 @@ static inline float CalculateAccelScale(uint16_t g_range)
 static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
 {
     SDL_DriverSInput_Context *ctx = (SDL_DriverSInput_Context *)device->context;
+    bool left_analog_stick_supported, right_analog_stick_supported,
+         left_analog_trigger_supported, right_analog_trigger_supported;
+    Uint8 *fflags, *buttons, *serial;
 
     // Obtain protocol version
     ctx->protocol_version = EXTRACTUINT16(data, 0);
 
-    //
-    // Unpack feature flags into context
-    //
-    Uint8 *fflags = data + 2;
-    Uint8 *buttons = data + 12;
-    ctx->rumble_supported = (fflags[0] & 0x01) != 0;
-    ctx->player_leds_supported = (fflags[0] & 0x02) != 0;
-    ctx->accelerometer_supported = (fflags[0] & 0x04) != 0;
-    ctx->gyroscope_supported = (fflags[0] & 0x08) != 0;
+    switch (ctx->protocol_version) {
+    case 1:
+    case 0:
+        //
+        // Unpack feature flags into context
+        //
+        fflags = data + 2;
+        buttons = data + 12;
+        ctx->rumble_supported = (fflags[0] & 0x01) != 0;
+        ctx->player_leds_supported = (fflags[0] & 0x02) != 0;
+        ctx->accelerometer_supported = (fflags[0] & 0x04) != 0;
+        ctx->gyroscope_supported = (fflags[0] & 0x08) != 0;
 
-    // Axes cannot be dynamic, so we only sanity check them
-    bool left_analog_stick_supported = (fflags[0] & 0x10) != 0;
-    bool right_analog_stick_supported = (fflags[0] & 0x20) != 0;
-    bool left_analog_trigger_supported = (fflags[0] & 0x40) != 0;
-    bool right_analog_trigger_supported = (fflags[0] & 0x80) != 0;
+        // Axes cannot be dynamic, so we only sanity check them
+        left_analog_stick_supported = (fflags[0] & 0x10) != 0;
+        right_analog_stick_supported = (fflags[0] & 0x20) != 0;
+        left_analog_trigger_supported = (fflags[0] & 0x40) != 0;
+        right_analog_trigger_supported = (fflags[0] & 0x80) != 0;
 
-    ctx->touchpad_supported = (fflags[1] & 0x01) != 0;
-    ctx->joystick_rgb_supported = (fflags[1] & 0x02) != 0;
-    ctx->is_handheld = (fflags[1] & 0x04) != 0;
+        ctx->touchpad_supported = (fflags[1] & 0x01) != 0;
+        ctx->joystick_rgb_supported = (fflags[1] & 0x02) != 0;
+        ctx->is_handheld = (fflags[1] & 0x04) != 0;
 
-    //
-    // Gamepad Info
-    //
-    SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
-    type = (SDL_GamepadType)SDL_clamp(data[4], SDL_GAMEPAD_TYPE_UNKNOWN, SDL_GAMEPAD_TYPE_COUNT);
-    device->type = type;
+        //
+        // Gamepad Info
+        //
+        SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
+        type = (SDL_GamepadType)SDL_clamp(data[4], SDL_GAMEPAD_TYPE_UNKNOWN, SDL_GAMEPAD_TYPE_COUNT);
+        device->type = type;
 
-    // The 3 MSB represent a button layout style SDL_GamepadFaceStyle
-    // The 5 LSB represent a device sub-type
-    device->guid.data[15] = data[5];
-    ctx->subtype = data[5];
+        // The 3 MSB represent a button layout style SDL_GamepadFaceStyle
+        // The 5 LSB represent a device sub-type
+        device->guid.data[15] = data[5];
+        ctx->subtype = data[5];
 
-    // Get and validate touchpad parameters
-    ctx->touchpad_count = data[16];
-    ctx->touchpad_finger_count = data[17];
+        // Get and validate touchpad parameters
+        ctx->touchpad_count = data[16];
+        ctx->touchpad_finger_count = data[17];
 
-    //
-    // IMU Info
-    //
-    ctx->polling_rate_ms = data[6];
-    ctx->accelRange = EXTRACTUINT16(data, 8);
-    ctx->gyroRange = EXTRACTUINT16(data, 10);
-    ctx->accelScale = CalculateAccelScale(ctx->accelRange);
-    ctx->gyroScale = CalculateGyroScale(ctx->gyroRange);
+        //
+        // IMU Info
+        //
+        ctx->polling_rate_ms = data[6];
+        ctx->accelRange = EXTRACTUINT16(data, 8);
+        ctx->gyroRange = EXTRACTUINT16(data, 10);
+        ctx->accelScale = CalculateAccelScale(ctx->accelRange);
+        ctx->gyroScale = CalculateGyroScale(ctx->gyroRange);
 
-    // Get device Serial - MAC address
-    Uint8 *serial = data + 18;
+        // Get device Serial - MAC address
+        serial = data + 18;
+        break;
+    default:
+        SDL_SetError("SInput device protocol version %d is not supported", ctx->protocol_version);
+        return false;
+    }
+
+    // Copy serial
     char serial_str[18];
     (void)SDL_snprintf(serial_str, sizeof(serial_str), "%.2x-%.2x-%.2x-%.2x-%.2x-%.2x",
                        serial[0], serial[1], serial[2], data[3], data[4], data[5]);
