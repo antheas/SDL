@@ -203,8 +203,10 @@ typedef struct
 
     Uint8 touchpad_count;        // 2 touchpads maximum
     Uint8 touchpad_finger_count; // 2 fingers for one touchpad, or 1 per touchpad (2 max)
+    Uint8 touchpad_width_mm;     // Touchpad width in mm
+    Uint8 touchpad_height_mm;    // Touchpad height in mm
 
-    Uint8  polling_rate_ms;
+    float polling_rate_hz;
     Uint8  subtype;
     ESinputControllerType controller_type;
     ESinputFaceStyle face_style;
@@ -271,8 +273,142 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     ctx->protocol_version = EXTRACTUINT16(data, 0);
 
     switch (ctx->protocol_version) {
+    case 2:
+        // Byte    | Data     | Meaning
+        // --------|----------|-------------------------------------------------------
+        // 0-1     | Various  | Protocol Version (2)
+        // 2       | 0x00–FF  | SDL Gamepad Type (See SDL Gamepad Type)
+        // 3       | 0x00–FF  | SDL Gamepad GUID Metadata
+        // 4-9     | Uint8x5  | MAC Address or Serial Number
+        // 10-11   | Uint16   | Polling rate in Hz (engine hint; may vary. Use IMU timestamp for accuracy)
+        // 12-13   | Uint16   | Accelerometer count per 10m/^2 (use 10197 for 10k/G)
+        // 14-15   | Uint16   | Gyroscope count per 10rad/s (use 11465 for 20dps)
+        // 16      | Uint8    | Touchpad Width (mm; up to 25.6 cm)
+        // 17      | Uint8    | Touchpad Height (mm; up to 25.6 cm)
+        // 18-21   | Uint8x4  | Button Usage Masks (See Buttons Format)
+        // 22-26   | Various  | Feature Flags 1-5
+        //
+        // Feature Flags 1:
+        // Same as V1/V0
+        //
+        // Feature Flags 2:
+        // 0x0X: Touchpad Support
+        // 0x10: Is Handheld
+        // 0x20: Joystick RGB Support
+        //
+        // The rest is for future proofing
+        //
+        // Touchpad Support:
+        // First two bits:
+        // 0x00: No Support
+        // 0x01: One Touchpad, 1 finger
+        // 0x02: One Touchpad, 2 fingers
+        // 0x03: Two Touchpads, 1 finger each
+        //
+        // 0x04: Reserved for other touchpad modes
+        // 0x08: Real pressure support. If 0, pressure = certainty
+        //       Use pressure = 1 to indicate touch without pressure
+
+        //
+        // Gamepad Info
+        //
+        SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
+        type = (SDL_GamepadType)SDL_clamp(data[2], SDL_GAMEPAD_TYPE_UNKNOWN, SDL_GAMEPAD_TYPE_COUNT);
+        device->type = type;
+
+        // The 3 MSB represent a button layout style SDL_GamepadFaceStyle
+        // The 5 LSB represent a device sub-type
+        device->guid.data[15] = data[3];
+        ctx->subtype = data[3];
+
+        // Get device Serial - MAC address
+        serial = data + 4;
+
+        //
+        // IMU Info
+        //
+        ctx->polling_rate_hz = EXTRACTUINT16(data, 10);
+        ctx->accelScale = 10.0f / EXTRACTUINT16(data, 12);
+        ctx->gyroScale = 10.0f / EXTRACTUINT16(data, 14);
+
+        //
+        // Unpack feature flags into context
+        //
+        buttons = data + 18;
+        fflags = data + 22;
+        ctx->rumble_supported = (fflags[0] & 0x01) != 0;
+        ctx->player_leds_supported = (fflags[0] & 0x02) != 0;
+        ctx->accelerometer_supported = (fflags[0] & 0x04) != 0;
+        ctx->gyroscope_supported = (fflags[0] & 0x08) != 0;
+
+        // Axes cannot be dynamic, so we only sanity check them
+        left_analog_stick_supported = (fflags[0] & 0x10) != 0;
+        right_analog_stick_supported = (fflags[0] & 0x20) != 0;
+        left_analog_trigger_supported = (fflags[0] & 0x40) != 0;
+        right_analog_trigger_supported = (fflags[0] & 0x80) != 0;
+        
+        // Touchpad support
+        ctx->touchpad_width_mm = data[16];
+        ctx->touchpad_height_mm = data[17];
+        switch (fflags[1] & 0x07) {
+        case 0x01:
+            ctx->touchpad_supported = true;
+            ctx->touchpad_count = 1;
+            ctx->touchpad_finger_count = 1;
+            break;
+        case 0x02:
+            ctx->touchpad_supported = true;
+            ctx->touchpad_count = 1;
+            ctx->touchpad_finger_count = 2;
+            break;
+        case 0x03:
+            ctx->touchpad_supported = true;
+            ctx->touchpad_count = 2;
+            ctx->touchpad_finger_count = 1;
+            break;
+        default:
+        case 0x00:
+            ctx->touchpad_supported = false;
+            ctx->touchpad_count = 0;
+            ctx->touchpad_finger_count = 0;
+            break;
+        }
+        ctx->is_handheld = (fflags[1] & 0x10) != 0;
+        ctx->joystick_rgb_supported = (fflags[1] & 0x20) != 0;
+        break;
     case 1:
     case 0:
+        // Byte    | Data     | Meaning
+        // --------|----------|-------------------------------------------------------
+        // 0-1     | Various  | Protocol Version (0-1)
+        // 2       | Various  | Feature Flags 1 (See Features Response Bytes)
+        // 3       | Various  | Feature Flags 2 (See Features Response Bytes)
+        // 4       | 0x00–FF  | SDL Gamepad Type (See SDL Gamepad Type)
+        // 5       | 0x00–FF  | SDL Gamepad GUID Metadata
+        // 6       | Uint8    | Polling rate (Milliseconds)
+        // 7       | Uint8    | Reserved
+        // 8-9     | Uint16   | Accelerometer G force range
+        // 10-11   | Uint16   | Gyroscope DPS sensitivity range
+        // 12-15   | Uint8    | Button Usage Masks (See Buttons Format)
+        // 16      | Uint8    | Touchpad Count (Max 2 touchpads)
+        // 17      | Uint8    | Touchpad Finger Count (Max 2 fingers TOTAL)
+        // 18-23   | Uint8    | MAC Address or Serial Number
+        //
+        // Feature Flags 1:
+        // 0x01 - Rumble supported
+        // 0x02 - Player LEDs supported
+        // 0x04 - Accelerometer supported
+        // 0x08 - Gyroscope supported
+        // 0x10 - Left Analog Stick supported
+        // 0x20 - Right Analog Stick supported
+        // 0x40 - Left Analog Trigger supported
+        // 0x80 - Right Analog Trigger supported
+        //
+        // Feature Flags 2:
+        // 0x01 - Touchpad supported
+        // 0x02 - Joystick RGB supported
+        // 0x04 - Is Handheld
+
         //
         // Unpack feature flags into context
         //
@@ -312,11 +448,9 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
         //
         // IMU Info
         //
-        ctx->polling_rate_ms = data[6];
-        ctx->accelRange = EXTRACTUINT16(data, 8);
-        ctx->gyroRange = EXTRACTUINT16(data, 10);
-        ctx->accelScale = CalculateAccelScale(ctx->accelRange);
-        ctx->gyroScale = CalculateGyroScale(ctx->gyroRange);
+        ctx->polling_rate_hz = 1000.0f / data[6];
+        ctx->accelScale = CalculateAccelScale(EXTRACTUINT16(data, 8));
+        ctx->gyroScale = CalculateGyroScale(EXTRACTUINT16(data, 10));
 
         // Get device Serial - MAC address
         serial = data + 18;
@@ -329,7 +463,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     // Copy serial
     char serial_str[18];
     (void)SDL_snprintf(serial_str, sizeof(serial_str), "%.2x-%.2x-%.2x-%.2x-%.2x-%.2x",
-                       serial[0], serial[1], serial[2], data[3], data[4], data[5]);
+                       serial[0], serial[1], serial[2], serial[3], serial[4], serial[5]);
     HIDAPI_SetDeviceSerial(device, serial_str);
 
     //
@@ -461,12 +595,13 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     }
 
 #if defined(DEBUG_SINPUT_INIT)
+    SDL_Log("SInput Protocol Version: %d", ctx->protocol_version);
     SDL_Log("SInput Face Style: %d", (device->guid.data[15] & 0xE0) >> 5);
     SDL_Log("SInput Sub-type: %d", (device->guid.data[15] & 0x1F));
     SDL_Log("Buttons count: %d", ctx->buttons_count);
     SDL_Log("Serial num: %s", serial);
-    SDL_Log("Accelerometer Range: %d", ctx->accelRange);
-    SDL_Log("Gyro Range: %d", ctx->gyroRange);
+    SDL_Log("Accelerometer Scale: %f", ctx->accelScale);
+    SDL_Log("Gyro Scale: %f", ctx->gyroScale);
 #endif
 
     return true;
@@ -655,11 +790,11 @@ static bool HIDAPI_DriverSInput_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     }
 
     if (ctx->accelerometer_supported) {
-        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, 1000.0f / ctx->polling_rate_ms);
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, ctx->polling_rate_hz);
     }
 
     if (ctx->gyroscope_supported) {
-        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, 1000.0f / ctx->polling_rate_ms);
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, ctx->polling_rate_hz);
     }
 
     if (ctx->touchpad_supported) {
