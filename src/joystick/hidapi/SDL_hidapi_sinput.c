@@ -260,18 +260,18 @@ static inline float CalculateAccelScale(uint16_t g_range)
     return SDL_STANDARD_GRAVITY / (32768.0f / (float)g_range);
 }
 
-static void ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
+static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
 {
     SDL_DriverSInput_Context *ctx = (SDL_DriverSInput_Context *)device->context;
 
     // Obtain protocol version
     ctx->protocol_version = EXTRACTUINT16(data, 0);
-    Uint8 *fflags = data + 2;
-    Uint8 *buttons = data + 12;
-    
+
     //
     // Unpack feature flags into context
     //
+    Uint8 *fflags = data + 2;
+    Uint8 *buttons = data + 12;
     ctx->rumble_supported = (fflags[0] & 0x01) != 0;
     ctx->player_leds_supported = (fflags[0] & 0x02) != 0;
     ctx->accelerometer_supported = (fflags[0] & 0x04) != 0;
@@ -299,10 +299,9 @@ static void ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     device->guid.data[15] = data[5];
     ctx->subtype = data[5];
 
-#if defined(DEBUG_SINPUT_INIT)
-    SDL_Log("SInput Face Style: %d", (data[5] & 0xE0) >> 5);
-    SDL_Log("SInput Sub-type: %d", (data[5] & 0x1F));
-#endif
+    // Get and validate touchpad parameters
+    ctx->touchpad_count = data[16];
+    ctx->touchpad_finger_count = data[17];
 
     //
     // IMU Info
@@ -310,6 +309,15 @@ static void ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     ctx->polling_rate_ms = data[6];
     ctx->accelRange = EXTRACTUINT16(data, 8);
     ctx->gyroRange = EXTRACTUINT16(data, 10);
+    ctx->accelScale = CalculateAccelScale(ctx->accelRange);
+    ctx->gyroScale = CalculateGyroScale(ctx->gyroRange);
+
+    // Get device Serial - MAC address
+    Uint8 *serial = data + 18;
+    char serial_str[18];
+    (void)SDL_snprintf(serial_str, sizeof(serial_str), "%.2x-%.2x-%.2x-%.2x-%.2x-%.2x",
+                       serial[0], serial[1], serial[2], data[3], data[4], data[5]);
+    HIDAPI_SetDeviceSerial(device, serial_str);
 
     //
     // Get mappings based on SDL subtype and assert that they match.
@@ -440,32 +448,15 @@ static void ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     }
 
 #if defined(DEBUG_SINPUT_INIT)
+    SDL_Log("SInput Face Style: %d", (device->guid.data[15] & 0xE0) >> 5);
+    SDL_Log("SInput Sub-type: %d", (device->guid.data[15] & 0x1F));
     SDL_Log("Buttons count: %d", ctx->buttons_count);
-#endif
-
-    // Get and validate touchpad parameters
-    ctx->touchpad_count = data[16];
-    ctx->touchpad_finger_count = data[17];
-
-    // Get device Serial - MAC address
-    char serial[18];
-    (void)SDL_snprintf(serial, sizeof(serial), "%.2x-%.2x-%.2x-%.2x-%.2x-%.2x",
-                       data[18], data[19], data[20], data[21], data[22], data[23]);
-#if defined(DEBUG_SINPUT_INIT)
     SDL_Log("Serial num: %s", serial);
-#endif
-    HIDAPI_SetDeviceSerial(device, serial);
-
-#if defined(DEBUG_SINPUT_INIT)
     SDL_Log("Accelerometer Range: %d", ctx->accelRange);
-#endif
-
-#if defined(DEBUG_SINPUT_INIT)
     SDL_Log("Gyro Range: %d", ctx->gyroRange);
 #endif
 
-    ctx->accelScale = CalculateAccelScale(ctx->accelRange);
-    ctx->gyroScale = CalculateGyroScale(ctx->gyroRange);
+    return true;
 }
 
 static bool RetrieveSDLFeatures(SDL_HIDAPI_Device *device)
@@ -509,11 +500,7 @@ static bool RetrieveSDLFeatures(SDL_HIDAPI_Device *device)
 #endif
 
         if ((read == USB_PACKET_LENGTH) && (data[0] == SINPUT_DEVICE_REPORT_ID_INPUT_CMDDAT) && (data[1] == SINPUT_DEVICE_COMMAND_FEATURES)) {
-            ProcessSDLFeaturesResponse(device, &(data[SINPUT_REPORT_IDX_COMMAND_RESPONSE_BULK]));
-#if defined(DEBUG_SINPUT_INIT)
-            SDL_Log("Received SInput SDL Features command response");
-#endif
-            return true;
+            return ProcessSDLFeaturesResponse(device, &(data[SINPUT_REPORT_IDX_COMMAND_RESPONSE_BULK]));
         }
     }
 
