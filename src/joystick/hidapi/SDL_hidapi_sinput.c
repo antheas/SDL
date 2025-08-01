@@ -47,8 +47,10 @@
 
 #define SINPUT_DEVICE_REPORT_SIZE           64 // Size of input reports (And CMD Input reports)
 #define SINPUT_DEVICE_REPORT_COMMAND_SIZE   48 // Size of command OUTPUT reports
+#define SINPUT_DEVICE_REPORT_FEATURE_SIZE   64 // Size of feature reports
 
 #define SINPUT_DEVICE_REPORT_ID_JOYSTICK_INPUT  0x01
+#define SINPUT_DEVICE_REPORT_ID_FEAT            0x02
 #define SINPUT_DEVICE_REPORT_ID_INPUT_CMDDAT    0x02
 #define SINPUT_DEVICE_REPORT_ID_OUTPUT_CMDDAT   0x03
 
@@ -608,7 +610,51 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     return true;
 }
 
-static bool RetrieveSDLFeatures(SDL_HIDAPI_Device *device)
+static bool RetrieveSDLFeaturesReport(SDL_HIDAPI_Device *device)
+{
+    int status = 0;
+
+    unsigned char report[SINPUT_DEVICE_REPORT_FEATURE_SIZE] = {
+        SINPUT_DEVICE_REPORT_ID_FEAT,
+        SINPUT_DEVICE_COMMAND_FEATURES,
+        'S', 'I', 'N', 'P', 'U', 'T', 0, 0,
+    };
+    // This write will occasionally return -1, so ignore failure here and try again
+    status = SDL_hid_send_feature_report(device->dev, report, sizeof(report));
+
+    if (status != sizeof(report)) {
+#if defined(DEBUG_SINPUT_INIT)
+        // Not all controllers support this. Let's not spam them.
+        SDL_LogWarn(
+            SDL_LOG_CATEGORY_INPUT,
+            "SInput device did not respond to set feature request. Error: %d",
+            status);
+        return false;
+#endif
+    }
+
+    status = SDL_hid_get_feature_report(device->dev, report, sizeof(report));
+
+    if (status < 0) {
+        SDL_LogWarn(
+            SDL_LOG_CATEGORY_INPUT,
+            "SInput device did not respond to get feature request. Error: %d",
+            status
+        );
+        return false;
+    }
+
+    if (report[0] != SINPUT_DEVICE_REPORT_ID_FEAT ||
+        report[1] != SINPUT_DEVICE_COMMAND_FEATURES ||
+        report[2] != 'S' || report[3] != 'I') {
+        HIDAPI_DumpPacket("SInput device did not respond with the expected feature report.", report, sizeof(report));
+        return false;
+    }
+
+    return ProcessSDLFeaturesResponse(device, (Uint8 *) &report[2]);
+}
+
+static bool RetrieveSDLFeaturesPolling(SDL_HIDAPI_Device *device)
 {
     int written = 0;
 
@@ -704,9 +750,9 @@ static bool HIDAPI_DriverSInput_InitDevice(SDL_HIDAPI_Device *device)
     ctx->device = device;
     device->context = ctx;
 
-    if (!RetrieveSDLFeatures(device)) {
+    if (!RetrieveSDLFeaturesReport(device)
+        && !RetrieveSDLFeaturesPolling(device))
         return false;
-    }
 
     switch (device->product_id) {
     case USB_PRODUCT_HANDHELDLEGEND_GCULTIMATE:
