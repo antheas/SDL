@@ -268,6 +268,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
     bool left_analog_stick_supported, right_analog_stick_supported,
          left_analog_trigger_supported, right_analog_trigger_supported;
     Uint8 *fflags, *buttons, *serial;
+    SDL_GamepadType type;
 
     // Obtain protocol version
     ctx->protocol_version = EXTRACTUINT16(data, 0);
@@ -312,7 +313,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
         //
         // Gamepad Info
         //
-        SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
+        type = SDL_GAMEPAD_TYPE_UNKNOWN;
         type = (SDL_GamepadType)SDL_clamp(data[2], SDL_GAMEPAD_TYPE_UNKNOWN, SDL_GAMEPAD_TYPE_COUNT);
         device->type = type;
 
@@ -373,7 +374,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
             ctx->touchpad_finger_count = 0;
             break;
         }
-        ctx->is_handheld = (fflags[1] & 0x10) != 0;
+        ctx->is_handheld = (fflags[1] & 0x10) != 0 || (type == SDL_GAMEPAD_TYPE_HANDHELD);
         ctx->joystick_rgb_supported = (fflags[1] & 0x20) != 0;
         break;
     case 1:
@@ -432,7 +433,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
         //
         // Gamepad Info
         //
-        SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
+        type = SDL_GAMEPAD_TYPE_UNKNOWN;
         type = (SDL_GamepadType)SDL_clamp(data[4], SDL_GAMEPAD_TYPE_UNKNOWN, SDL_GAMEPAD_TYPE_COUNT);
         device->type = type;
 
