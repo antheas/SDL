@@ -142,46 +142,6 @@
 #define EXTRACTUINT32(data, idx) ((Uint32)((data)[(idx)] | ((data)[(idx) + 1] << 8) | ((data)[(idx) + 2] << 16) | ((data)[(idx) + 3] << 24)))
 #endif
 
-
-typedef struct
-{
-    uint8_t type;
-
-    union {
-        // Frequency Amplitude pairs
-        struct {
-            struct {
-                uint16_t frequency_1;
-                uint16_t amplitude_1;
-                uint16_t frequency_2;
-                uint16_t amplitude_2;
-            } left;
-
-            struct {
-                uint16_t frequency_1;
-                uint16_t amplitude_1;
-                uint16_t frequency_2;
-                uint16_t amplitude_2;
-            } right;
-
-        } type_1;
-
-        // Basic ERM simulation model
-        struct {
-            struct {
-                uint8_t amplitude;
-                bool brake;
-            } left;
-
-            struct {
-                uint8_t amplitude;
-                bool brake;
-            } right;
-
-        } type_2;
-    };
-} SINPUT_HAPTIC_S;
-
 typedef struct
 {
     SDL_HIDAPI_Device *device;
@@ -202,6 +162,7 @@ typedef struct
     bool dpad_supported;
     bool touchpad_supported;
     bool is_handheld;
+    bool trigger_rumble_supported;
 
     Uint8 touchpad_count;        // 2 touchpads maximum
     Uint8 touchpad_finger_count; // 2 fingers for one touchpad, or 1 per touchpad (2 max)
@@ -224,8 +185,12 @@ typedef struct
     Uint8 usage_masks[4];
 
     Uint32 last_imu_timestamp_us;
+    Uint64 imu_timestamp_ns;
 
-    Uint64 imu_timestamp_ns; // Nanoseconds. We accumulate with received deltas
+    Uint16 left_rumble;
+    Uint16 right_rumble;
+    Uint16 left_trigger_rumble;
+    Uint16 right_trigger_rumble;
 } SDL_DriverSInput_Context;
 
 void HIDAPI_DriverSInput_GetControllerType(
@@ -298,6 +263,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
         // 0x0X: Touchpad Support
         // 0x10: Is Handheld
         // 0x20: Joystick RGB Support
+        // 0x30: Trigger Rumble Support
         //
         // The rest is for future proofing
         //
@@ -378,6 +344,7 @@ static bool ProcessSDLFeaturesResponse(SDL_HIDAPI_Device *device, Uint8 *data)
         }
         ctx->is_handheld = (fflags[1] & 0x10) != 0 || (type == SDL_GAMEPAD_TYPE_HANDHELD);
         ctx->joystick_rgb_supported = (fflags[1] & 0x20) != 0;
+        ctx->trigger_rumble_supported = (fflags[1] & 0x30) != 0;
         break;
     case 1:
     case 0:
@@ -702,20 +669,6 @@ static bool RetrieveSDLFeaturesPolling(SDL_HIDAPI_Device *device)
     return false;
 }
 
-// Type 2 haptics are for more traditional rumble such as
-// ERM motors or simulated ERM motors
-static inline void HapticsType2Pack(SINPUT_HAPTIC_S *in, Uint8 *out)
-{
-    // Type of haptics
-    out[0] = 2;
-
-    out[1] = in->type_2.left.amplitude;
-    out[2] = in->type_2.left.brake;
-
-    out[3] = in->type_2.right.amplitude;
-    out[4] = in->type_2.right.brake;
-}
-
 static void HIDAPI_DriverSInput_RegisterHints(SDL_HintCallback callback, void *userdata)
 {
     SDL_AddHintCallback(SDL_HINT_JOYSTICK_HIDAPI_SINPUT, callback, userdata);
@@ -866,24 +819,48 @@ static bool HIDAPI_DriverSInput_OpenJoystick(SDL_HIDAPI_Device *device, SDL_Joys
     return true;
 }
 
+static void HIDAPI_DriverSInput_UpdateRumble(SDL_HIDAPI_Device *device)
+{
+    SDL_DriverSInput_Context *ctx = (SDL_DriverSInput_Context *)device->context;
+
+    Uint8 report[SINPUT_DEVICE_REPORT_COMMAND_SIZE] = {
+        SINPUT_DEVICE_REPORT_ID_OUTPUT_CMDDAT,
+        SINPUT_DEVICE_COMMAND_HAPTIC,
+    };
+
+    switch (ctx->protocol_version) {
+    case 1:
+    case 0:
+        // THese are simple. Only 8 bit rumble
+        report[2] = 0x02;
+        report[3] = (Uint8)(ctx->left_rumble >> 8);
+        report[4] = 0;
+        report[5] = (Uint8)(ctx->right_rumble >> 8);
+        report[6] = 0;
+        break;
+    case 2:
+    default:
+        report[2] = (Uint8)(ctx->left_rumble >> 8);
+        report[3] = (Uint8)(ctx->left_rumble & 0xFF);
+        report[4] = (Uint8)(ctx->left_trigger_rumble >> 8);
+        report[5] = (Uint8)(ctx->left_trigger_rumble & 0xFF);
+        report[6] = (Uint8)(ctx->right_rumble >> 8);
+        report[7] = (Uint8)(ctx->right_rumble & 0xFF);
+        report[8] = (Uint8)(ctx->right_trigger_rumble >> 8);
+        report[9] = (Uint8)(ctx->right_trigger_rumble & 0xFF);
+        break;
+    }
+    SDL_HIDAPI_SendRumble(device, report, SINPUT_DEVICE_REPORT_COMMAND_SIZE);
+}
+
 static bool HIDAPI_DriverSInput_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
 {
-
     SDL_DriverSInput_Context *ctx = (SDL_DriverSInput_Context *)device->context;
 
     if (ctx->rumble_supported) {
-        SINPUT_HAPTIC_S hapticData = { 0 };
-        Uint8 hapticReport[SINPUT_DEVICE_REPORT_COMMAND_SIZE] = { SINPUT_DEVICE_REPORT_ID_OUTPUT_CMDDAT, SINPUT_DEVICE_COMMAND_HAPTIC };
-
-        // Low Frequency  = Left
-        // High Frequency = Right
-        hapticData.type_2.left.amplitude = (Uint8) (low_frequency_rumble >> 8);
-        hapticData.type_2.right.amplitude = (Uint8)(high_frequency_rumble >> 8);
-
-        HapticsType2Pack(&hapticData, &(hapticReport[2]));
-
-        SDL_HIDAPI_SendRumble(device, hapticReport, SINPUT_DEVICE_REPORT_COMMAND_SIZE);
-
+        ctx->left_rumble = low_frequency_rumble;
+        ctx->right_rumble = high_frequency_rumble;
+        HIDAPI_DriverSInput_UpdateRumble(device);
         return true;
     }
 
@@ -892,6 +869,15 @@ static bool HIDAPI_DriverSInput_RumbleJoystick(SDL_HIDAPI_Device *device, SDL_Jo
 
 static bool HIDAPI_DriverSInput_RumbleJoystickTriggers(SDL_HIDAPI_Device *device, SDL_Joystick *joystick, Uint16 left_rumble, Uint16 right_rumble)
 {
+    SDL_DriverSInput_Context *ctx = (SDL_DriverSInput_Context *)device->context;
+
+    if (ctx->trigger_rumble_supported) {
+        ctx->left_trigger_rumble = left_rumble;
+        ctx->right_trigger_rumble = right_rumble;
+        HIDAPI_DriverSInput_UpdateRumble(device);
+        return true;
+    }
+
     return SDL_Unsupported();
 }
 
@@ -902,6 +888,10 @@ static Uint32 HIDAPI_DriverSInput_GetJoystickCapabilities(SDL_HIDAPI_Device *dev
     Uint32 caps = 0;
     if (ctx->rumble_supported) {
         caps |= SDL_JOYSTICK_CAP_RUMBLE;
+    }
+
+    if (ctx->trigger_rumble_supported) {
+        caps |= SDL_JOYSTICK_CAP_TRIGGER_RUMBLE;
     }
 
     if (ctx->player_leds_supported) {
